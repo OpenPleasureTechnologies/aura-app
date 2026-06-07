@@ -53,3 +53,22 @@ MIT
 git clone https://github.com/OPT/aura-app
 cd aura-app/android
 ./gradlew assembleDebug
+
+Option 3: Request APK
+Open an issue saying "Request APK" and I'll send you the latest build.
+
+Requirements
+Android 8.0 (API 26) or higher
+
+Bluetooth LE capable device
+
+Your pleasure device in pairing mode
+
+Tested Devices
+Lovense Lush 3 ✅
+
+Lovense Max 2 ✅
+
+We-Vibe Chorus (needs testing)
+
+Your device? Tell us!
