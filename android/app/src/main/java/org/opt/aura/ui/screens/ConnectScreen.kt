@@ -2,6 +2,7 @@ package org.opt.aura.ui.screens
 
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
 import android.content.Intent
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -22,23 +23,30 @@ import org.opt.aura.viewmodel.BleViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ConnectScreen(viewModel: BleViewModel = viewModel()) {
+fun ConnectScreen(
+    onDeviceConnected: (BluetoothDevice) -> Unit = {},
+    viewModel: BleViewModel = viewModel()
+) {
     val context = LocalContext.current
     val discoveredDevices by viewModel.discoveredDevices.collectAsState()
     val isScanning by viewModel.isScanning.collectAsState()
+    val connectionState by viewModel.connectionState.collectAsState()
+    val isConnecting by viewModel.isConnecting.collectAsState()
     
     // Permission launchers
     val bluetoothLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { 
-        // Enable Bluetooth result handled
+        if (viewModel.isBluetoothEnabled()) {
+            viewModel.startScan()
+        }
     }
     
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         val allGranted = permissions.values.all { it }
-        if (allGranted) {
+        if (allGranted && viewModel.isBluetoothEnabled()) {
             viewModel.startScan()
         }
     }
@@ -67,9 +75,35 @@ fun ConnectScreen(viewModel: BleViewModel = viewModel()) {
         
         if (neededPermissions.isNotEmpty()) {
             permissionLauncher.launch(neededPermissions.toTypedArray())
-        } else {
+        } else if (viewModel.isBluetoothEnabled()) {
             viewModel.startScan()
         }
+    }
+    
+    // Show connection dialog
+    if (isConnecting) {
+        AlertDialog(
+            onDismissRequest = { },
+            title = { Text("Connecting...") },
+            text = { 
+                Column {
+                    Text(connectionState.deviceName ?: "Device")
+                    LinearProgressIndicator(modifier = Modifier.padding(top = 8.dp))
+                    connectionState.error?.let {
+                        Text(
+                            text = it,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { viewModel.cancelConnection() }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
     
     Scaffold(
@@ -85,7 +119,14 @@ fun ConnectScreen(viewModel: BleViewModel = viewModel()) {
                             Text("Stop")
                         }
                     } else {
-                        Button(onClick = { viewModel.startScan() }) {
+                        Button(onClick = { 
+                            if (viewModel.isBluetoothEnabled()) {
+                                viewModel.startScan() 
+                            } else {
+                                val intent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
+                                bluetoothLauncher.launch(intent)
+                            }
+                        }) {
                             Text("Scan")
                         }
                     }
@@ -125,17 +166,42 @@ fun ConnectScreen(viewModel: BleViewModel = viewModel()) {
                 }
             }
             
-            // Scan status
             if (isScanning) {
-                LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth(),
-                    color = MaterialTheme.colorScheme.primary
-                )
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                 Text(
                     text = "Scanning for devices...",
                     modifier = Modifier.padding(16.dp),
                     style = MaterialTheme.typography.bodyMedium
                 )
+            }
+            
+            // Show connected device status
+            if (connectionState.isConnected) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text("Connected to", style = MaterialTheme.typography.labelSmall)
+                            Text(
+                                connectionState.deviceName ?: "Device",
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                        }
+                        Button(onClick = { viewModel.disconnectDevice() }) {
+                            Text("Disconnect")
+                        }
+                    }
+                }
             }
             
             // Device list
@@ -144,17 +210,35 @@ fun ConnectScreen(viewModel: BleViewModel = viewModel()) {
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                item {
-                    Text(
-                        text = "Found ${discoveredDevices.size} devices",
-                        style = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier.padding(bottom = 8.dp)
-                    )
+                if (discoveredDevices.isNotEmpty()) {
+                    item {
+                        Text(
+                            text = "Found ${discoveredDevices.size} devices",
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
+                    }
                 }
                 
                 items(discoveredDevices) { device ->
-                    DeviceCard(device = device) {
-                        // TODO: Connect to device
+                    DeviceCard(
+                        device = device,
+                        isConnecting = isConnecting,
+                        onConnect = { 
+                            viewModel.connectToDevice(device.address) { bluetoothDevice ->
+                                onDeviceConnected(bluetoothDevice)
+                            }
+                        }
+                    )
+                }
+                
+                if (discoveredDevices.isEmpty() && !isScanning) {
+                    item {
+                        Text(
+                            text = "No devices found. Make sure your device is in pairing mode.",
+                            modifier = Modifier.padding(16.dp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }
@@ -163,10 +247,16 @@ fun ConnectScreen(viewModel: BleViewModel = viewModel()) {
 }
 
 @Composable
-fun DeviceCard(device: BleDevice, onConnect: () -> Unit) {
+fun DeviceCard(
+    device: BleDevice, 
+    isConnecting: Boolean,
+    onConnect: () -> Unit
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        onClick = onConnect
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
     ) {
         Row(
             modifier = Modifier
@@ -191,14 +281,14 @@ fun DeviceCard(device: BleDevice, onConnect: () -> Unit) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 
-                // Show if it might be a pleasure device
                 if (isPleasureDevice(device)) {
                     Surface(
                         shape = MaterialTheme.shapes.small,
-                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
+                        modifier = Modifier.padding(top = 4.dp)
                     ) {
                         Text(
-                            text = "𖦹 Pleasure device detected",
+                            text = "𖦹 Pleasure device",
                             fontSize = MaterialTheme.typography.labelSmall.fontSize,
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                         )
@@ -206,24 +296,26 @@ fun DeviceCard(device: BleDevice, onConnect: () -> Unit) {
                 }
             }
             
-            IconButton(onClick = onConnect) {
-                Text("Connect", color = MaterialTheme.colorScheme.primary)
+            Button(
+                onClick = onConnect,
+                enabled = !isConnecting
+            ) {
+                Text(if (isConnecting) "..." else "Connect")
             }
         }
     }
 }
 
-// Detect if a device is likely a pleasure device based on UUID patterns
 fun isPleasureDevice(device: BleDevice): Boolean {
     val knownUuids = listOf(
-        "0000fff0", "0000180d", "0000fe51", "0000ffe0",  // Lovense, We-Vibe, etc.
+        "0000fff0", "0000180d", "0000fe51", "0000ffe0",
         "0000fdd3", "0000fff6"
     )
     
     return device.serviceUuids.any { uuid ->
         knownUuids.any { known -> uuid.toString().startsWith(known, ignoreCase = true) }
     } || device.name?.let { name ->
-        listOf("Lovense", "We-Vibe", "Lush", "Max", "Nora", "Hush", "Sync", "Chorus")
+        listOf("Lovense", "We-Vibe", "Kiiroo", "LELO", "Lush", "Max", "Nora", "Hush", "Sync", "Chorus", "Moxie", "Onyx", "Pearl")
             .any { name.contains(it, ignoreCase = true) }
     } == true
 }
